@@ -2,6 +2,9 @@
 
 A personal database for trading in game Elite: Dangerous.
 
+The mpai development deployment is documented in
+[docs/mpai-deployment.md](docs/mpai-deployment.md).
+
 ## Requirements
 
 * Node.js 20 or newer

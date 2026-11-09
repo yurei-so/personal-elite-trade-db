@@ -1,0 +1,11 @@
+[Unit]
+Description=Personal Elite trade database PostgreSQL cluster
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/postgresql/17/bin/postgres -D %h/.local/share/personal-elite-trade-db/postgres -c listen_addresses= -c unix_socket_directories=%t -p 55438
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

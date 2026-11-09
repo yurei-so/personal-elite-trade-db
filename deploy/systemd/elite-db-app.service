@@ -1,0 +1,15 @@
+[Unit]
+Description=Personal Elite trade database dashboard and EDDN listener
+Requires=elite-db-postgres.service
+After=elite-db-postgres.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.config/personal-elite-trade-db
+ExecStart=%h/.local/opt/node22/bin/node %h/.local/share/personal-elite-trade-db/current/dist/index.js --dashboard 8787 --eddn --enable-write
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=default.target
