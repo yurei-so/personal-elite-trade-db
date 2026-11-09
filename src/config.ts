@@ -208,7 +208,7 @@ function buildDatabaseUrl(options: DatabaseUrlOptions): string {
   const databaseName = encodeURIComponent(options.databaseName);
 
   if (options.host.startsWith("/")) {
-    return `postgres://${credentials}@/${databaseName}?host=${encodeURIComponent(options.host)}`;
+    return `postgres://${credentials}@/${databaseName}?host=${encodeURIComponent(options.host)}&port=${options.port}`;
   }
 
   return `postgres://${credentials}@${options.host}:${options.port}/${databaseName}`;
