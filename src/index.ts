@@ -11,6 +11,7 @@ import type { DatabaseDoctorReport, DatabaseDoctorStatus } from "./database";
 import {
   applyDatabasePatches,
   createDatabaseManager,
+  migrateEddnPriceSemantics,
   importPowerplay,
   importStations,
   importSystems,
@@ -22,7 +23,7 @@ import {
   verifyPasswordHash,
 } from "./dashboard";
 import { createEddnListener } from "./eddn/listener";
-import { EddnMarketPatchBuffer } from "./eddn/patcher";
+import { EddnMarketPatchBuffer, persistBgsSystemObservation } from "./eddn/patcher";
 
 const DASHBOARD_PASSWORD_FLAGS = new Set([
   "--dashboard-user-password",
@@ -88,6 +89,17 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
   const database = createDatabaseManager(config);
 
   try {
+    if (parsedArgs.migratePriceSemantics) {
+      await database.initialize();
+      const result = await migrateEddnPriceSemantics(database);
+      console.log(
+        result.applied
+          ? `${statusTag("ok")} Corrected EDDN price semantics in ${valueText(String(result.rowsUpdated))} current market rows.`
+          : `${statusTag("ok")} EDDN price semantics migration was already applied; no rows changed.`,
+      );
+      return;
+    }
+
     if (parsedArgs.initializeDatabase) {
       const result = await database.initialize();
 
@@ -262,6 +274,7 @@ interface ParsedArgs {
   readonly importSystemsFilePath: string | undefined;
   readonly initializeDatabase: boolean;
   readonly listenEddn: boolean;
+  readonly migratePriceSemantics: boolean;
   readonly runDoctor: boolean;
   readonly serveDashboard: boolean;
   readonly showHelp: boolean;
@@ -283,6 +296,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
   let importSystemsFlag = false;
   let initializeDatabase = false;
   let listenEddn = false;
+  let migratePriceSemantics = false;
   let runDoctor = false;
   let serveDashboard = false;
 
@@ -309,6 +323,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
         importSystemsFilePath: undefined,
         initializeDatabase: false,
         listenEddn: false,
+        migratePriceSemantics: false,
         runDoctor: false,
         serveDashboard: false,
         showHelp: true,
@@ -328,6 +343,11 @@ function parseArgs(args: readonly string[]): ParsedArgs {
 
     if (arg === "--enable-write") {
       enableWrite = true;
+      continue;
+    }
+
+    if (arg === "--migrate-price-semantics") {
+      migratePriceSemantics = true;
       continue;
     }
 
@@ -474,13 +494,29 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       importSystemsFlag ||
       importPowerplayFlag ||
       initializeDatabase ||
-      runDoctor)
+      runDoctor ||
+      migratePriceSemantics)
   ) {
     throw new Error("--dashboard can only be combined with --eddn.");
   }
 
   if (destroyPassword !== undefined && !destroyDatabase) {
     throw new Error("--password can only be used with --destroy-db.");
+  }
+
+  if (
+    migratePriceSemantics &&
+    (destroyDatabase ||
+      importPowerplayFlag ||
+      importStationsFlag ||
+      importSystemsFlag ||
+      initializeDatabase ||
+      listenEddn ||
+      runDoctor ||
+      serveDashboard ||
+      updatedLabels.length > 0)
+  ) {
+    throw new Error("--migrate-price-semantics must run alone after a verified database backup and with the EDDN writer stopped.");
   }
 
   if (destroyDatabase && destroyPassword === undefined) {
@@ -502,6 +538,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
     importSystemsFilePath,
     initializeDatabase,
     listenEddn,
+    migratePriceSemantics,
     runDoctor,
     serveDashboard,
     showHelp: false,
@@ -623,7 +660,37 @@ async function runDashboardWithEddn(
         console.log(`${statusTag("ok")} ${patch.description}`);
       }
     },
+    onBgsObservation: async (observation) => {
+      inboundMessages.recordMessage();
+
+      if (!eddnDatabase) {
+        return;
+      }
+
+      const inserted = await persistBgsSystemObservation(eddnDatabase, observation);
+      if (inserted) {
+        console.log(
+          `${statusTag("ok")} Recorded BGS ${valueText(observation.event)} observation for ${valueText(observation.systemName)} (${observation.factions.length} factions).`,
+        );
+      }
+    },
   });
+  const flushBufferedMarkets = async (): Promise<void> => {
+    const patches = patchBuffer?.flush() ?? [];
+
+    if (patches.length === 0 || !eddnDatabase) {
+      return;
+    }
+
+    await applyDatabasePatches(eddnDatabase, patches);
+    inboundMessages.recordPatch();
+
+    for (const patch of patches) {
+      console.log(`${statusTag("ok")} ${patch.description}`);
+    }
+  };
+  let flushInFlight = Promise.resolve();
+  let flushTimer: NodeJS.Timeout | undefined;
 
   if (eddnDatabase) {
     const result = await eddnDatabase.initialize();
@@ -653,6 +720,13 @@ async function runDashboardWithEddn(
   }
 
   const listenerPromise = listener.start();
+  flushTimer = setInterval(() => {
+    flushInFlight = flushInFlight
+      .then(flushBufferedMarkets)
+      .catch((error: unknown) => {
+        console.error(`${statusTag("error")} Could not flush buffered EDDN market data.`, error);
+      });
+  }, 5_000);
   let isStopping = false;
   let resolveStopped: (() => void) | undefined;
   let stopPromise: Promise<void> | undefined;
@@ -672,18 +746,11 @@ async function runDashboardWithEddn(
     stopPromise = (async () => {
       try {
         await listener.stop();
-
-        const patches = patchBuffer?.flush() ?? [];
-
-        if (patches.length > 0 && eddnDatabase) {
-          await applyDatabasePatches(eddnDatabase, patches);
-          inboundMessages.recordPatch();
-
-          for (const patch of patches) {
-            console.log(`${statusTag("ok")} ${patch.description}`);
-          }
-        }
+        if (flushTimer) clearInterval(flushTimer);
+        await flushInFlight;
+        await flushBufferedMarkets();
       } finally {
+        if (flushTimer) clearInterval(flushTimer);
         await Promise.allSettled([
           server.close(),
           dashboardDatabase.close(),
@@ -793,7 +860,38 @@ async function runEddnListener(options: EddnListenerRunOptions): Promise<void> {
           }
         }
       : undefined,
+    onBgsObservation: database
+      ? async (observation) => {
+          const inserted = await persistBgsSystemObservation(database, observation);
+          if (inserted) {
+            console.log(
+              `${statusTag("ok")} Recorded BGS ${valueText(observation.event)} observation for ${valueText(observation.systemName)} (${observation.factions.length} factions).`,
+            );
+          }
+        }
+      : undefined,
   });
+  const flushBufferedMarkets = async (): Promise<void> => {
+    const patches = patchBuffer?.flush() ?? [];
+
+    if (patches.length === 0 || !database) {
+      return;
+    }
+
+    await applyDatabasePatches(database, patches);
+
+    for (const patch of patches) {
+      console.log(`${statusTag("ok")} ${patch.description}`);
+    }
+  };
+  let flushInFlight = Promise.resolve();
+  const flushTimer = setInterval(() => {
+    flushInFlight = flushInFlight
+      .then(flushBufferedMarkets)
+      .catch((error: unknown) => {
+        console.error(`${statusTag("error")} Could not flush buffered EDDN market data.`, error);
+      });
+  }, 5_000);
   let isStopping = false;
   const stop = (): void => {
     if (isStopping) {
@@ -823,17 +921,11 @@ async function runEddnListener(options: EddnListenerRunOptions): Promise<void> {
 
     await listener.start();
   } finally {
+    clearInterval(flushTimer);
+    await flushInFlight;
     if (database && patchBuffer) {
       try {
-        const patches = patchBuffer.flush();
-
-        if (patches.length > 0) {
-          await applyDatabasePatches(database, patches);
-
-          for (const patch of patches) {
-            console.log(`${statusTag("ok")} ${patch.description}`);
-          }
-        }
+        await flushBufferedMarkets();
       } finally {
         await database.close();
       }
@@ -1102,6 +1194,7 @@ Usage:
   npm run dev -- --import-systems [systems file]
   npm run dev -- --import-stations [stations file]
   npm run dev -- --import-powerplay [PowerPlay file]
+  npm run dev -- --migrate-price-semantics
   npm run dev -- --destroy-db --password <admin password>
   npm run dev -- --eddn
   npm run dev -- --eddn --enable-write

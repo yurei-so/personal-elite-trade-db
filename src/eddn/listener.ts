@@ -1,4 +1,5 @@
 import { inflateSync } from "node:zlib";
+import { createHash } from "node:crypto";
 
 import { Subscriber } from "zeromq";
 
@@ -14,6 +15,7 @@ export interface EddnListenerOptions {
   readonly relayUrl?: string;
   readonly logger?: Pick<Console, "error" | "log" | "warn">;
   onMarketSnapshot?(snapshot: MarketSnapshot): Promise<void> | void;
+  onBgsObservation?(observation: BgsSystemObservation): Promise<void> | void;
 }
 
 interface EddnEnvelope {
@@ -27,6 +29,15 @@ interface EddnCommodityMessage {
   readonly marketId?: unknown;
   readonly stationName?: unknown;
   readonly systemName?: unknown;
+  readonly timestamp?: unknown;
+}
+
+interface EddnJournalMessage {
+  readonly ActiveStates?: unknown;
+  readonly Factions?: unknown;
+  readonly SystemFaction?: unknown;
+  readonly StarSystem?: unknown;
+  readonly event?: unknown;
   readonly timestamp?: unknown;
 }
 
@@ -58,6 +69,28 @@ export interface MarketSnapshot {
   readonly marketId: number | undefined;
   readonly stationName: string | undefined;
   readonly systemName: string | undefined;
+  readonly schemaRef: string;
+  readonly eventHash: string;
+}
+
+export interface BgsFactionObservation {
+  readonly activeStates: readonly string[];
+  readonly factionState: string | undefined;
+  readonly happiness: string | undefined;
+  readonly influence: number | undefined;
+  readonly name: string;
+  readonly pendingStates: readonly string[];
+  readonly recoveringStates: readonly string[];
+}
+
+export interface BgsSystemObservation {
+  readonly event: string;
+  readonly eventHash: string;
+  readonly factions: readonly BgsFactionObservation[];
+  readonly observedAt: string;
+  readonly schemaRef: string;
+  readonly systemFactionName: string | undefined;
+  readonly systemName: string;
 }
 
 export function createEddnListener(
@@ -85,6 +118,7 @@ export function createEddnListener(
         socket,
         logger,
         options.onMarketSnapshot,
+        options.onBgsObservation,
       ).finally(() => {
         isRunning = false;
         socket = undefined;
@@ -116,6 +150,7 @@ async function runListenerLoop(
   socket: Subscriber,
   logger: Pick<Console, "error" | "log" | "warn">,
   onMarketSnapshot?: (snapshot: MarketSnapshot) => Promise<void> | void,
+  onBgsObservation?: (observation: BgsSystemObservation) => Promise<void> | void,
 ): Promise<void> {
   try {
     for await (const [payload] of socket) {
@@ -123,15 +158,20 @@ async function runListenerLoop(
         continue;
       }
 
-      const snapshot = parseMarketSnapshot(payload);
+      const envelope = parseEddnEnvelope(payload);
+      const snapshot = parseMarketSnapshotEnvelope(envelope);
 
-      if (!snapshot) {
-        continue;
+      if (snapshot && onMarketSnapshot) {
+        await onMarketSnapshot(snapshot);
       }
 
-      if (onMarketSnapshot) {
-        await onMarketSnapshot(snapshot);
-      } else {
+      const bgsObservation = parseBgsSystemObservation(envelope);
+
+      if (bgsObservation && onBgsObservation) {
+        await onBgsObservation(bgsObservation);
+      }
+
+      if (snapshot && !onMarketSnapshot) {
         logMarketSnapshot(snapshot, logger);
       }
     }
@@ -145,7 +185,10 @@ async function runListenerLoop(
 export function parseMarketSnapshot(
   compressedPayload: Buffer,
 ): MarketSnapshot | undefined {
-  const parsed: unknown = JSON.parse(inflateSync(compressedPayload).toString("utf8"));
+  return parseMarketSnapshotEnvelope(parseEddnEnvelope(compressedPayload));
+}
+
+function parseMarketSnapshotEnvelope(parsed: unknown): MarketSnapshot | undefined {
 
   if (!isEddnEnvelope(parsed) || !isCommoditySchema(parsed.$schemaRef)) {
     return undefined;
@@ -165,13 +208,108 @@ export function parseMarketSnapshot(
     return undefined;
   }
 
-  return {
+  const snapshot = {
     collectedAt: readString(message.timestamp),
     commodities,
     marketId: readNumber(message.marketId),
     stationName: readString(message.stationName),
     systemName: readString(message.systemName),
+    schemaRef: readString(parsed.$schemaRef) ?? "unknown",
   };
+
+  return {
+    ...snapshot,
+    eventHash: hashNormalizedEvent(snapshot),
+  };
+}
+
+function parseBgsSystemObservation(parsed: unknown): BgsSystemObservation | undefined {
+  if (!isEddnEnvelope(parsed) || !isJournalSchema(parsed.$schemaRef)) {
+    return undefined;
+  }
+
+  const message = parsed.message as EddnJournalMessage | undefined;
+  const event = readString(message?.event);
+  const observedAt = readString(message?.timestamp);
+  const systemName = readString(message?.StarSystem);
+  const rawFactions = message?.Factions;
+
+  if (
+    !message ||
+    !event ||
+    !["Location", "FSDJump", "CarrierJump"].includes(event) ||
+    !observedAt ||
+    !systemName ||
+    !Array.isArray(rawFactions)
+  ) {
+    return undefined;
+  }
+
+  const factions = rawFactions
+    .map(readBgsFactionObservation)
+    .filter((faction): faction is BgsFactionObservation => faction !== undefined);
+
+  if (factions.length === 0) {
+    return undefined;
+  }
+
+  const systemFaction = isPlainObject(message.SystemFaction)
+    ? readString(message.SystemFaction.Name)
+    : undefined;
+  const normalized = {
+    event,
+    factions,
+    observedAt,
+    schemaRef: readString(parsed.$schemaRef) ?? "unknown",
+    systemFactionName: systemFaction,
+    systemName,
+  };
+
+  return { ...normalized, eventHash: hashNormalizedEvent(normalized) };
+}
+
+function readBgsFactionObservation(value: unknown): BgsFactionObservation | undefined {
+  if (!isPlainObject(value)) {
+    return undefined;
+  }
+
+  const name = readString(value.Name);
+  if (!name) {
+    return undefined;
+  }
+
+  return {
+    activeStates: readStateNames(value.ActiveStates),
+    factionState: readString(value.FactionState),
+    happiness: readString(value.Happiness),
+    influence: readNumber(value.Influence),
+    name,
+    pendingStates: readStateNames(value.PendingStates),
+    recoveringStates: readStateNames(value.RecoveringStates),
+  };
+}
+
+function readStateNames(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!isPlainObject(entry)) {
+      return [];
+    }
+
+    const state = readString(entry.State);
+    return state ? [state] : [];
+  });
+}
+
+function parseEddnEnvelope(compressedPayload: Buffer): unknown {
+  return JSON.parse(inflateSync(compressedPayload).toString("utf8"));
+}
+
+function hashNormalizedEvent(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function readCommoditySnapshot(
@@ -211,6 +349,7 @@ function logMarketSnapshot(
         commodityCount: snapshot.commodities.length,
         commodities: snapshot.commodities,
         marketId: snapshot.marketId,
+        schemaRef: snapshot.schemaRef,
         stationName: snapshot.stationName,
         systemName: snapshot.systemName,
       },
@@ -226,6 +365,10 @@ function isEddnEnvelope(value: unknown): value is EddnEnvelope {
 
 function isCommoditySchema(schemaRef: unknown): boolean {
   return typeof schemaRef === "string" && schemaRef.includes(COMMODITY_SCHEMA_MARKER);
+}
+
+function isJournalSchema(schemaRef: unknown): boolean {
+  return typeof schemaRef === "string" && schemaRef.includes("/journal/");
 }
 
 function isCommodityMessage(value: unknown): value is EddnCommodityMessage {

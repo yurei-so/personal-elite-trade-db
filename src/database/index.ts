@@ -1,4 +1,4 @@
-export { DatabaseSetupError, createDatabaseManager } from "./manager";
+export { DatabaseSetupError, createDatabaseManager, migrateEddnPriceSemantics } from "./manager";
 export { importPowerplay, importStations, importSystems } from "./importer";
 export type {
   DatabaseDoctorReport,

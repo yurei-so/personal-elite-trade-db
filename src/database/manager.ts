@@ -127,6 +127,9 @@ const EXPECTED_TABLES: readonly ExpectedTable[] = [
       { name: "max_landing_pad_size", type: "text", isNullable: true },
       { name: "has_market", type: "boolean", isNullable: false },
       { name: "is_planetary", type: "boolean", isNullable: true },
+      { name: "controlling_faction_id", type: "bigint", isNullable: true },
+      { name: "controlling_faction_name", type: "text", isNullable: true },
+      { name: "controlling_faction_updated_at", type: "timestamp with time zone", isNullable: true },
       { name: "updated_at", type: "timestamp with time zone", isNullable: false },
     ],
     constraints: [
@@ -147,10 +150,85 @@ const EXPECTED_TABLES: readonly ExpectedTable[] = [
       { name: "government", type: "text", isNullable: true },
       { name: "state", type: "text", isNullable: true },
       { name: "updated_at", type: "timestamp with time zone", isNullable: false },
+      { name: "last_seen_at", type: "timestamp with time zone", isNullable: false },
     ],
     constraints: [{ type: "PRIMARY KEY", columns: ["system_id", "power"] }],
     foreignKeys: [
       { column: "system_id", referencedTable: "systems", referencedColumn: "id" },
+    ],
+  },
+  {
+    name: "powerplay_state_history",
+    columns: [
+      { name: "id", type: "bigint", isNullable: false },
+      { name: "system_id", type: "bigint", isNullable: false },
+      { name: "power", type: "text", isNullable: false },
+      { name: "power_state", type: "text", isNullable: false },
+      { name: "allegiance", type: "text", isNullable: true },
+      { name: "government", type: "text", isNullable: true },
+      { name: "system_state", type: "text", isNullable: true },
+      { name: "source_updated_at", type: "timestamp with time zone", isNullable: false },
+      { name: "observed_at", type: "timestamp with time zone", isNullable: false },
+      { name: "source", type: "text", isNullable: false },
+    ],
+    constraints: [{ type: "PRIMARY KEY", columns: ["id"] }],
+    foreignKeys: [
+      { column: "system_id", referencedTable: "systems", referencedColumn: "id" },
+    ],
+  },
+  {
+    name: "bgs_system_observations",
+    columns: [
+      { name: "id", type: "bigint", isNullable: false },
+      { name: "system_name", type: "text", isNullable: false },
+      { name: "event", type: "text", isNullable: false },
+      { name: "source_observed_at", type: "timestamp with time zone", isNullable: false },
+      { name: "received_at", type: "timestamp with time zone", isNullable: false },
+      { name: "event_hash", type: "text", isNullable: false },
+      { name: "system_faction_name", type: "text", isNullable: true },
+      { name: "source_schema", type: "text", isNullable: false },
+    ],
+    constraints: [
+      { type: "PRIMARY KEY", columns: ["id"] },
+      { type: "UNIQUE", columns: ["event_hash"] },
+    ],
+    foreignKeys: [],
+  },
+  {
+    name: "station_faction_observations",
+    columns: [
+      { name: "id", type: "bigint", isNullable: false },
+      { name: "station_id", type: "bigint", isNullable: false },
+      { name: "faction_id", type: "bigint", isNullable: true },
+      { name: "faction_name", type: "text", isNullable: false },
+      { name: "source_updated_at", type: "timestamp with time zone", isNullable: false },
+      { name: "observed_at", type: "timestamp with time zone", isNullable: false },
+      { name: "source", type: "text", isNullable: false },
+    ],
+    constraints: [
+      { type: "PRIMARY KEY", columns: ["id"] },
+      { type: "UNIQUE", columns: ["station_id", "faction_name", "source_updated_at"] },
+    ],
+    foreignKeys: [
+      { column: "station_id", referencedTable: "stations", referencedColumn: "id" },
+    ],
+  },
+  {
+    name: "bgs_faction_observations",
+    columns: [
+      { name: "observation_id", type: "bigint", isNullable: false },
+      { name: "faction_name", type: "text", isNullable: false },
+      { name: "faction_state", type: "text", isNullable: true },
+      { name: "influence", type: "numeric", isNullable: true },
+      { name: "happiness", type: "text", isNullable: true },
+      { name: "active_states", type: "jsonb", isNullable: false },
+      { name: "pending_states", type: "jsonb", isNullable: false },
+      { name: "recovering_states", type: "jsonb", isNullable: false },
+      { name: "is_controlling_faction", type: "boolean", isNullable: false },
+    ],
+    constraints: [{ type: "PRIMARY KEY", columns: ["observation_id", "faction_name"] }],
+    foreignKeys: [
+      { column: "observation_id", referencedTable: "bgs_system_observations", referencedColumn: "id" },
     ],
   },
   {
@@ -191,12 +269,59 @@ const EXPECTED_TABLES: readonly ExpectedTable[] = [
       },
     ],
   },
+  {
+    name: "market_snapshots",
+    columns: [
+      { name: "id", type: "bigint", isNullable: false },
+      { name: "station_id", type: "bigint", isNullable: true },
+      { name: "market_id", type: "bigint", isNullable: false },
+      { name: "system_name", type: "text", isNullable: false },
+      { name: "station_name", type: "text", isNullable: false },
+      { name: "collected_at", type: "timestamp with time zone", isNullable: false },
+      { name: "received_at", type: "timestamp with time zone", isNullable: false },
+      { name: "event_hash", type: "text", isNullable: false },
+      { name: "source", type: "text", isNullable: false },
+      { name: "source_schema", type: "text", isNullable: false },
+    ],
+    constraints: [
+      { type: "PRIMARY KEY", columns: ["id"] },
+      { type: "UNIQUE", columns: ["event_hash"] },
+    ],
+    foreignKeys: [
+      { column: "station_id", referencedTable: "stations", referencedColumn: "id" },
+    ],
+  },
+  {
+    name: "market_observations",
+    columns: [
+      { name: "snapshot_id", type: "bigint", isNullable: false },
+      { name: "commodity_id", type: "text", isNullable: false },
+      { name: "commander_buy_price", type: "bigint", isNullable: true },
+      { name: "commander_sell_price", type: "bigint", isNullable: true },
+      { name: "demand", type: "bigint", isNullable: true },
+      { name: "demand_level", type: "text", isNullable: true },
+      { name: "stock", type: "bigint", isNullable: true },
+      { name: "stock_level", type: "text", isNullable: true },
+      { name: "mean_price", type: "bigint", isNullable: true },
+    ],
+    constraints: [{ type: "PRIMARY KEY", columns: ["snapshot_id", "commodity_id"] }],
+    foreignKeys: [
+      { column: "snapshot_id", referencedTable: "market_snapshots", referencedColumn: "id" },
+      { column: "commodity_id", referencedTable: "commodities", referencedColumn: "id" },
+    ],
+  },
 ];
 
 const EXPECTED_INDEXES = [
   "systems_x_z_idx",
   "station_commodities_commodity_id_idx",
   "station_commodities_collected_at_idx",
+  "market_snapshots_collected_at_idx",
+  "market_snapshots_station_time_idx",
+  "market_observations_commodity_snapshot_idx",
+  "bgs_system_observations_system_time_idx",
+  "powerplay_state_history_system_time_idx",
+  "station_faction_observations_station_time_idx",
 ] as const;
 
 const EXPECTED_TABLE_NAMES = EXPECTED_TABLES.map((table) => table.name);
@@ -665,6 +790,10 @@ async function initializeDatabaseSetup(client: PoolClient): Promise<void> {
     )
   `);
 
+  await client.query(`ALTER TABLE stations ADD COLUMN IF NOT EXISTS controlling_faction_id bigint`);
+  await client.query(`ALTER TABLE stations ADD COLUMN IF NOT EXISTS controlling_faction_name text`);
+  await client.query(`ALTER TABLE stations ADD COLUMN IF NOT EXISTS controlling_faction_updated_at timestamp with time zone`);
+
   await client.query(`
     CREATE TABLE IF NOT EXISTS powerplay_systems (
       system_id bigint NOT NULL REFERENCES systems(id),
@@ -674,7 +803,91 @@ async function initializeDatabaseSetup(client: PoolClient): Promise<void> {
       government text,
       state text,
       updated_at timestamp with time zone NOT NULL,
+      last_seen_at timestamp with time zone NOT NULL DEFAULT now(),
       PRIMARY KEY (system_id, power)
+    )
+  `);
+
+  await client.query(`ALTER TABLE powerplay_systems ADD COLUMN IF NOT EXISTS last_seen_at timestamp with time zone`);
+  await client.query(`UPDATE powerplay_systems SET last_seen_at = updated_at WHERE last_seen_at IS NULL`);
+  await client.query(`ALTER TABLE powerplay_systems ALTER COLUMN last_seen_at SET NOT NULL`);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS powerplay_state_history (
+      id bigserial PRIMARY KEY,
+      system_id bigint NOT NULL REFERENCES systems(id),
+      power text NOT NULL,
+      power_state text NOT NULL,
+      allegiance text,
+      government text,
+      system_state text,
+      source_updated_at timestamp with time zone NOT NULL,
+      observed_at timestamp with time zone NOT NULL,
+      source text NOT NULL
+    )
+  `);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS app_migrations (
+      version text PRIMARY KEY,
+      applied_at timestamp with time zone NOT NULL DEFAULT now()
+    )
+  `);
+
+  await client.query(`
+    INSERT INTO powerplay_state_history (
+      system_id, power, power_state, allegiance, government,
+      system_state, source_updated_at, observed_at, source
+    )
+    SELECT
+      current.system_id, current.power, current.power_state, current.allegiance,
+      current.government, current.state, current.updated_at, now(), 'edsm-powerplay-baseline'
+    FROM powerplay_systems current
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM powerplay_state_history history
+      WHERE history.system_id = current.system_id AND history.power = current.power
+    )
+  `);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS bgs_system_observations (
+      id bigserial PRIMARY KEY,
+      system_name text NOT NULL,
+      event text NOT NULL,
+      source_observed_at timestamp with time zone NOT NULL,
+      received_at timestamp with time zone NOT NULL DEFAULT now(),
+      event_hash text NOT NULL UNIQUE,
+      system_faction_name text,
+      source_schema text NOT NULL
+    )
+  `);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS station_faction_observations (
+      id bigserial PRIMARY KEY,
+      station_id bigint NOT NULL REFERENCES stations(id),
+      faction_id bigint,
+      faction_name text NOT NULL,
+      source_updated_at timestamp with time zone NOT NULL,
+      observed_at timestamp with time zone NOT NULL,
+      source text NOT NULL,
+      UNIQUE (station_id, faction_name, source_updated_at)
+    )
+  `);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS bgs_faction_observations (
+      observation_id bigint NOT NULL REFERENCES bgs_system_observations(id) ON DELETE CASCADE,
+      faction_name text NOT NULL,
+      faction_state text,
+      influence numeric,
+      happiness text,
+      active_states jsonb NOT NULL DEFAULT '[]'::jsonb,
+      pending_states jsonb NOT NULL DEFAULT '[]'::jsonb,
+      recovering_states jsonb NOT NULL DEFAULT '[]'::jsonb,
+      is_controlling_faction boolean NOT NULL DEFAULT false,
+      PRIMARY KEY (observation_id, faction_name)
     )
   `);
 
@@ -705,6 +918,36 @@ async function initializeDatabaseSetup(client: PoolClient): Promise<void> {
   `);
 
   await client.query(`
+    CREATE TABLE IF NOT EXISTS market_snapshots (
+      id bigserial PRIMARY KEY,
+      station_id bigint REFERENCES stations(id),
+      market_id bigint NOT NULL,
+      system_name text NOT NULL,
+      station_name text NOT NULL,
+      collected_at timestamp with time zone NOT NULL,
+      received_at timestamp with time zone NOT NULL DEFAULT now(),
+      event_hash text NOT NULL UNIQUE,
+      source text NOT NULL,
+      source_schema text NOT NULL
+    )
+  `);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS market_observations (
+      snapshot_id bigint NOT NULL REFERENCES market_snapshots(id) ON DELETE CASCADE,
+      commodity_id text NOT NULL REFERENCES commodities(id),
+      commander_buy_price bigint,
+      commander_sell_price bigint,
+      demand bigint,
+      demand_level text,
+      stock bigint,
+      stock_level text,
+      mean_price bigint,
+      PRIMARY KEY (snapshot_id, commodity_id)
+    )
+  `);
+
+  await client.query(`
     CREATE INDEX IF NOT EXISTS systems_x_z_idx
     ON systems (x, z)
   `);
@@ -718,6 +961,61 @@ async function initializeDatabaseSetup(client: PoolClient): Promise<void> {
     CREATE INDEX IF NOT EXISTS station_commodities_collected_at_idx
     ON station_commodities (collected_at)
   `);
+
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS market_snapshots_collected_at_idx
+    ON market_snapshots (collected_at)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS market_snapshots_station_time_idx
+    ON market_snapshots (station_id, collected_at DESC)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS market_observations_commodity_snapshot_idx
+    ON market_observations (commodity_id, snapshot_id)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS bgs_system_observations_system_time_idx
+    ON bgs_system_observations (system_name, source_observed_at DESC)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS powerplay_state_history_system_time_idx
+    ON powerplay_state_history (system_id, observed_at DESC)
+  `);
+  await client.query(`
+    CREATE INDEX IF NOT EXISTS station_faction_observations_station_time_idx
+    ON station_faction_observations (station_id, source_updated_at DESC)
+  `);
+}
+
+export async function migrateEddnPriceSemantics(
+  database: DatabaseManager,
+): Promise<{ readonly applied: boolean; readonly rowsUpdated: number }> {
+  return database.transaction(async (client) => {
+    const marker = await client.query<{ readonly version: string }>(
+      `
+        INSERT INTO app_migrations (version)
+        VALUES ('2026-11-16-eddn-price-semantics-v1')
+        ON CONFLICT (version) DO NOTHING
+        RETURNING version
+      `,
+    );
+
+    if (marker.rowCount === 0) {
+      return { applied: false, rowsUpdated: 0 };
+    }
+
+    const update = await client.query(
+      `
+        UPDATE station_commodities
+        SET station_sell_price = station_buy_price,
+            station_buy_price = station_sell_price
+        WHERE source = 'eddn'
+      `,
+    );
+
+    return { applied: true, rowsUpdated: update.rowCount ?? 0 };
+  });
 }
 
 interface ColumnCatalogRow extends QueryResultRow {

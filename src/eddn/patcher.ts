@@ -4,7 +4,7 @@ import type {
   StationCommodityRow,
 } from "./parser";
 import { parseMarketSnapshotRows } from "./parser";
-import type { MarketSnapshot } from "./listener";
+import type { BgsSystemObservation, MarketSnapshot } from "./listener";
 
 const DEFAULT_EDDN_PATCH_BATCH_SIZE = 500;
 
@@ -19,6 +19,7 @@ export interface QueuedEddnMarketPatches {
 
 interface EddnMarketPatchRows {
   readonly commodities: readonly CommodityRow[];
+  readonly snapshots: readonly MarketSnapshot[];
   readonly stations: readonly StationRow[];
   readonly stationCommodities: readonly EddnStationCommodityRow[];
 }
@@ -40,6 +41,7 @@ export class EddnMarketPatchBuffer {
   private readonly commodities = new Map<string, CommodityRow>();
   private readonly stations = new Map<string, StationRow>();
   private readonly stationCommodities = new Map<string, EddnStationCommodityRow>();
+  private readonly snapshots = new Map<string, MarketSnapshot>();
 
   public constructor(options: EddnMarketPatchBufferOptions = {}) {
     this.batchSize = options.batchSize ?? DEFAULT_EDDN_PATCH_BATCH_SIZE;
@@ -51,6 +53,7 @@ export class EddnMarketPatchBuffer {
 
   public queueSnapshot(snapshot: MarketSnapshot): QueuedEddnMarketPatches {
     const parsedRows = parseMarketSnapshotRows(snapshot);
+    this.snapshots.set(snapshot.eventHash, snapshot);
 
     for (const commodity of parsedRows.commodities) {
       this.commodities.set(commodity.id, commodity);
@@ -96,6 +99,7 @@ export class EddnMarketPatchBuffer {
   public flush(): readonly DatabasePatch[] {
     if (
       this.commodities.size === 0 &&
+      this.snapshots.size === 0 &&
       this.stations.size === 0 &&
       this.stationCommodities.size === 0
     ) {
@@ -108,7 +112,10 @@ export class EddnMarketPatchBuffer {
   private drainReadyPatches(): DatabasePatch[] {
     const patches: DatabasePatch[] = [];
 
-    while (this.stationCommodities.size >= this.batchSize) {
+    while (
+      this.stationCommodities.size >= this.batchSize ||
+      this.snapshots.size >= 25
+    ) {
       patches.push(this.createPatch());
     }
 
@@ -118,21 +125,84 @@ export class EddnMarketPatchBuffer {
   private createPatch(): DatabasePatch {
     const rows: EddnMarketPatchRows = {
       commodities: takeAllRows(this.commodities),
+      snapshots: takeAllRows(this.snapshots),
       stations: takeAllRows(this.stations),
       stationCommodities: takeRows(this.stationCommodities, this.batchSize),
     };
     const commodityCount = rows.commodities.length;
     const stationCount = rows.stations.length;
     const stationCommodityCount = rows.stationCommodities.length;
+    const snapshotCount = rows.snapshots.length;
 
     return {
       id: `eddn-market-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      description: `Upsert ${commodityCount} commodities, ${stationCount} stations, and ${stationCommodityCount} station commodity rows from EDDN.`,
+      description: `Upsert ${commodityCount} commodities, ${stationCount} stations, ${stationCommodityCount} station commodity rows, and record ${snapshotCount} market snapshots from EDDN.`,
       async apply(database: DatabaseManager): Promise<void> {
         await applyEddnMarketPatch(database, rows);
       },
     };
   }
+}
+
+export async function persistBgsSystemObservation(
+  database: DatabaseManager,
+  observation: BgsSystemObservation,
+): Promise<boolean> {
+  return database.transaction(async (client) => {
+    const result = await client.query<{ readonly id: string }>(
+      `
+        INSERT INTO bgs_system_observations (
+          system_name, event, source_observed_at, event_hash, system_faction_name, source_schema
+        )
+        VALUES ($1, $2, $3::timestamp with time zone, $4, $5, $6)
+        ON CONFLICT (event_hash) DO NOTHING
+        RETURNING id::text AS id
+      `,
+      [
+        observation.systemName,
+        observation.event,
+        observation.observedAt,
+        observation.eventHash,
+        observation.systemFactionName ?? null,
+        observation.schemaRef,
+      ],
+    );
+    const insertedObservation = result.rows[0];
+
+    if (!insertedObservation) {
+      return false;
+    }
+
+    await client.query(
+      `
+        INSERT INTO bgs_faction_observations (
+          observation_id, faction_name, faction_state, influence, happiness,
+          active_states, pending_states, recovering_states, is_controlling_faction
+        )
+        SELECT *
+        FROM unnest(
+          $1::bigint[], $2::text[], $3::text[], $4::numeric[], $5::text[],
+          $6::jsonb[], $7::jsonb[], $8::jsonb[], $9::boolean[]
+        )
+        ON CONFLICT (observation_id, faction_name) DO NOTHING
+      `,
+      [
+        observation.factions.map(() => insertedObservation.id),
+        observation.factions.map((faction) => faction.name),
+        observation.factions.map((faction) => faction.factionState ?? null),
+        observation.factions.map((faction) => faction.influence ?? null),
+        observation.factions.map((faction) => faction.happiness ?? null),
+        observation.factions.map((faction) => JSON.stringify(faction.activeStates)),
+        observation.factions.map((faction) => JSON.stringify(faction.pendingStates)),
+        observation.factions.map((faction) => JSON.stringify(faction.recoveringStates)),
+        observation.factions.map(
+          (faction) => normalizedName(faction.name) === normalizedName(observation.systemFactionName),
+        ),
+      ],
+    );
+
+    return true;
+  });
 }
 
 async function applyEddnMarketPatch(
@@ -300,6 +370,7 @@ async function applyEddnMarketPatch(
             collected_at = EXCLUDED.collected_at,
             received_at = EXCLUDED.received_at,
             source = EXCLUDED.source
+          WHERE station_commodities.collected_at <= EXCLUDED.collected_at
         `,
         [
           rows.stationCommodities.map((commodity) => commodity.stationId),
@@ -314,6 +385,78 @@ async function applyEddnMarketPatch(
           rows.stationCommodities.map((commodity) => commodity.source),
           rows.stationCommodities.map((commodity) => commodity.stationName),
           rows.stationCommodities.map((commodity) => commodity.systemName),
+        ],
+      );
+    }
+
+    for (const snapshot of rows.snapshots) {
+      const collectedAt = snapshot.collectedAt;
+      const marketId = snapshot.marketId;
+      const stationName = snapshot.stationName;
+      const systemName = snapshot.systemName;
+
+      if (!collectedAt || marketId === undefined || !stationName || !systemName) {
+        continue;
+      }
+
+      const snapshotResult = await client.query<{ readonly id: string }>(
+        `
+          INSERT INTO market_snapshots (
+            station_id, market_id, system_name, station_name,
+            collected_at, event_hash, source, source_schema
+          )
+          VALUES (
+            (
+              SELECT stations.id
+              FROM stations
+              JOIN systems ON systems.id = stations.system_id
+              WHERE stations.name = $3
+                AND systems.name = $2
+              ORDER BY stations.id
+              LIMIT 1
+            ),
+            $1::bigint, $2, $3, $4::timestamp with time zone, $5, 'eddn', $6
+          )
+          ON CONFLICT (event_hash) DO NOTHING
+          RETURNING id::text AS id
+        `,
+        [marketId, systemName, stationName, collectedAt, snapshot.eventHash, snapshot.schemaRef],
+      );
+      const insertedSnapshot = snapshotResult.rows[0];
+
+      if (!insertedSnapshot) {
+        continue;
+      }
+
+      const snapshotRows = parseMarketSnapshotRows(snapshot).stationCommodities;
+
+      if (snapshotRows.length === 0) {
+        continue;
+      }
+
+      await client.query(
+        `
+          INSERT INTO market_observations (
+            snapshot_id, commodity_id, commander_buy_price,
+            commander_sell_price, demand, demand_level, stock, stock_level, mean_price
+          )
+          SELECT *
+          FROM unnest(
+            $1::bigint[], $2::text[], $3::bigint[], $4::bigint[],
+            $5::bigint[], $6::text[], $7::bigint[], $8::text[], $9::bigint[]
+          )
+          ON CONFLICT (snapshot_id, commodity_id) DO NOTHING
+        `,
+        [
+          snapshotRows.map(() => insertedSnapshot.id),
+          snapshotRows.map((row) => row.commodityId),
+          snapshotRows.map((row) => row.stationSellPrice),
+          snapshotRows.map((row) => row.stationBuyPrice),
+          snapshotRows.map((row) => row.demand),
+          snapshotRows.map((row) => row.demandLevel),
+          snapshotRows.map((row) => row.stock),
+          snapshotRows.map((row) => row.stockLevel),
+          snapshotRows.map((row) => row.meanPrice),
         ],
       );
     }
@@ -354,4 +497,8 @@ function createStationCommodityKey(
   commodityId: string,
 ): string {
   return `${createStationKey(systemName, stationName)}\u0000${commodityId}`;
+}
+
+function normalizedName(value: string | undefined): string {
+  return value?.trim().toLocaleLowerCase("en-US") ?? "";
 }

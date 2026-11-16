@@ -1,4 +1,5 @@
 import type { MarketCommoditySnapshot, MarketSnapshot } from "./listener";
+import { createHash } from "node:crypto";
 
 const LOW_LEVEL = 1;
 const MEDIUM_LEVEL = 2;
@@ -25,6 +26,7 @@ export interface StationCommodityRow {
   readonly demandLevel: string | null;
   readonly stock: number | null;
   readonly stockLevel: string | null;
+  readonly meanPrice: number | null;
   readonly collectedAt: string;
   readonly source: string;
 }
@@ -53,6 +55,7 @@ interface LoggedMarketSnapshot {
   readonly marketId?: unknown;
   readonly stationName?: unknown;
   readonly systemName?: unknown;
+  readonly schemaRef?: unknown;
 }
 
 interface LoggedMarketCommodity {
@@ -173,12 +176,16 @@ function createStationCommodityRow(
   return {
     stationId,
     commodityId,
-    stationSellPrice: numberOrNull(commodity.sellPrice),
-    stationBuyPrice: numberOrNull(commodity.buyPrice),
+    // EDDN buyPrice is the commander's purchase price from the market;
+    // station_sell_price is the price the station offers to a commander.
+    stationSellPrice: numberOrNull(commodity.buyPrice),
+    // EDDN sellPrice is the commander's sale price to the market.
+    stationBuyPrice: numberOrNull(commodity.sellPrice),
     demand: numberOrNull(commodity.demand),
     demandLevel: levelToText(commodity.demandLevel),
     stock: numberOrNull(commodity.stock),
     stockLevel: levelToText(commodity.stockLevel),
+    meanPrice: numberOrNull(commodity.meanPrice),
     collectedAt,
     source,
   };
@@ -203,12 +210,18 @@ function readLoggedMarketSnapshot(value: unknown): MarketSnapshot | undefined {
     return undefined;
   }
 
-  return {
+  const snapshot = {
     collectedAt: readString(logged.collectedAt),
     commodities,
     marketId: readNumber(logged.marketId),
     stationName: readString(logged.stationName),
     systemName: readString(logged.systemName),
+    schemaRef: readString(logged.schemaRef) ?? "legacy-market-log",
+  };
+
+  return {
+    ...snapshot,
+    eventHash: createHash("sha256").update(JSON.stringify(snapshot)).digest("hex"),
   };
 }
 

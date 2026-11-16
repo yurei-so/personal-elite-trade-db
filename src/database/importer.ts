@@ -86,6 +86,9 @@ interface RawCoordinates {
 }
 
 interface ImportedStation {
+  readonly controllingFactionId: number | null;
+  readonly controllingFactionName: string | null;
+  readonly controllingFactionUpdatedAt: string | null;
   readonly distanceToArrival: number | null;
   readonly hasMarket: boolean;
   readonly id: number;
@@ -99,6 +102,7 @@ interface ImportedStation {
 }
 
 interface RawImportedStation {
+  readonly controllingFaction?: unknown;
   readonly distanceToArrival?: unknown;
   readonly haveMarket?: unknown;
   readonly id?: unknown;
@@ -110,6 +114,11 @@ interface RawImportedStation {
   readonly systemName?: unknown;
   readonly type?: unknown;
   readonly updateTime?: unknown;
+}
+
+interface RawControllingFaction {
+  readonly id?: unknown;
+  readonly name?: unknown;
 }
 
 interface RawStationUpdateTime {
@@ -351,6 +360,7 @@ export async function importPowerplay(
   const systemsToAdd = new Map<number, ImportedSystem>();
   const pendingSystemIdsByName = new Map<string, number>();
   const startedAt = Date.now();
+  const observedAt = new Date().toISOString();
   let batchesPatched = 0;
   let powerplayImported = 0;
   let powerplaySkipped = 0;
@@ -415,7 +425,7 @@ export async function importPowerplay(
         systemsToAdd.clear();
         pendingSystemIdsByName.clear();
       }
-      powerplayImported += await patchPowerplayBatch(database, batch);
+      powerplayImported += await patchPowerplayBatch(database, batch, observedAt);
       batchesPatched += 1;
       batch.length = 0;
     }
@@ -437,7 +447,7 @@ export async function importPowerplay(
       }
       powerplaySystemsAdded += newSystems.length;
     }
-    powerplayImported += await patchPowerplayBatch(database, batch);
+    powerplayImported += await patchPowerplayBatch(database, batch, observedAt);
     batchesPatched += 1;
   }
 
@@ -595,12 +605,21 @@ function parseImportedStation(candidate: string): ImportedStation | undefined {
   const systemName = readStringOrNull(rawStation.systemName);
   const name = readString(rawStation.name);
   const updatedAt = readStationUpdatedAt(rawStation.updateTime);
+  const controllingFaction = isPlainObject(rawStation.controllingFaction)
+    ? rawStation.controllingFaction as RawControllingFaction
+    : undefined;
+  const controllingFactionUpdatedAt = isPlainObject(rawStation.updateTime)
+    ? readDate((rawStation.updateTime as RawStationUpdateTime).information)
+    : undefined;
 
   if (id === undefined || systemId === undefined || !name || !updatedAt) {
     return undefined;
   }
 
   return {
+    controllingFactionId: readNumberOrNull(controllingFaction?.id),
+    controllingFactionName: readStringOrNull(controllingFaction?.name),
+    controllingFactionUpdatedAt: controllingFaction ? controllingFactionUpdatedAt ?? null : null,
     distanceToArrival: readNumberOrNull(rawStation.distanceToArrival),
     hasMarket: readBoolean(rawStation.haveMarket) ?? false,
     id,
@@ -842,7 +861,9 @@ async function patchStationsBatch(
   database: DatabaseManager,
   stations: readonly ImportedStation[],
 ): Promise<number> {
-  const result = await database.query(
+  let imported = 0;
+  await database.transaction(async (client) => {
+    const result = await client.query(
     `
       WITH patch_rows AS (
         SELECT *
@@ -855,7 +876,10 @@ async function patchStationsBatch(
           $6::text[],
           $7::boolean[],
           $8::boolean[],
-          $9::timestamp with time zone[]
+          $9::bigint[],
+          $10::text[],
+          $11::timestamp with time zone[],
+          $12::timestamp with time zone[]
         ) AS patch(
           id,
           system_id,
@@ -865,6 +889,9 @@ async function patchStationsBatch(
           max_landing_pad_size,
           has_market,
           is_planetary,
+          controlling_faction_id,
+          controlling_faction_name,
+          controlling_faction_updated_at,
           updated_at
         )
       )
@@ -877,6 +904,9 @@ async function patchStationsBatch(
         max_landing_pad_size,
         has_market,
         is_planetary,
+        controlling_faction_id,
+        controlling_faction_name,
+        controlling_faction_updated_at,
         updated_at
       )
       SELECT
@@ -888,21 +918,38 @@ async function patchStationsBatch(
         patch.max_landing_pad_size,
         patch.has_market,
         patch.is_planetary,
+        patch.controlling_faction_id,
+        patch.controlling_faction_name,
+        patch.controlling_faction_updated_at,
         patch.updated_at
       FROM patch_rows patch
       JOIN systems
         ON systems.id = patch.system_id
       ON CONFLICT (id) DO UPDATE
       SET
-        system_id = EXCLUDED.system_id,
-        name = EXCLUDED.name,
-        type = EXCLUDED.type,
-        distance_to_arrival = EXCLUDED.distance_to_arrival,
-        max_landing_pad_size = EXCLUDED.max_landing_pad_size,
-        has_market = EXCLUDED.has_market,
-        is_planetary = EXCLUDED.is_planetary,
-        updated_at = EXCLUDED.updated_at
-      WHERE stations.updated_at <= EXCLUDED.updated_at
+        system_id = CASE WHEN stations.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.system_id ELSE stations.system_id END,
+        name = CASE WHEN stations.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.name ELSE stations.name END,
+        type = CASE WHEN stations.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.type ELSE stations.type END,
+        distance_to_arrival = CASE WHEN stations.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.distance_to_arrival ELSE stations.distance_to_arrival END,
+        max_landing_pad_size = CASE WHEN stations.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.max_landing_pad_size ELSE stations.max_landing_pad_size END,
+        has_market = stations.has_market OR EXCLUDED.has_market,
+        is_planetary = CASE WHEN stations.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.is_planetary ELSE stations.is_planetary END,
+        controlling_faction_id = CASE
+          WHEN EXCLUDED.controlling_faction_updated_at IS NOT NULL
+            AND (stations.controlling_faction_updated_at IS NULL
+              OR stations.controlling_faction_updated_at <= EXCLUDED.controlling_faction_updated_at)
+          THEN EXCLUDED.controlling_faction_id ELSE stations.controlling_faction_id END,
+        controlling_faction_name = CASE
+          WHEN EXCLUDED.controlling_faction_updated_at IS NOT NULL
+            AND (stations.controlling_faction_updated_at IS NULL
+              OR stations.controlling_faction_updated_at <= EXCLUDED.controlling_faction_updated_at)
+          THEN EXCLUDED.controlling_faction_name ELSE stations.controlling_faction_name END,
+        controlling_faction_updated_at = CASE
+          WHEN EXCLUDED.controlling_faction_updated_at IS NOT NULL
+            AND (stations.controlling_faction_updated_at IS NULL
+              OR stations.controlling_faction_updated_at <= EXCLUDED.controlling_faction_updated_at)
+          THEN EXCLUDED.controlling_faction_updated_at ELSE stations.controlling_faction_updated_at END,
+        updated_at = GREATEST(stations.updated_at, EXCLUDED.updated_at)
     `,
     [
       stations.map((station) => station.id),
@@ -913,18 +960,102 @@ async function patchStationsBatch(
       stations.map((station) => station.maxLandingPadSize),
       stations.map((station) => station.hasMarket),
       stations.map((station) => station.isPlanetary),
+      stations.map((station) => station.controllingFactionId),
+      stations.map((station) => station.controllingFactionName),
+      stations.map((station) => station.controllingFactionUpdatedAt),
       stations.map((station) => station.updatedAt),
     ],
-  );
+    );
 
-  return result.rowCount ?? 0;
+    await client.query(
+      `
+        WITH patch_rows AS (
+          SELECT *
+          FROM unnest(
+            $1::text[], $2::text[], $3::bigint[], $4::text[],
+            $5::timestamp with time zone[]
+          ) AS patch(system_name, station_name, faction_id, faction_name, source_updated_at)
+        )
+        INSERT INTO station_faction_observations (
+          station_id, faction_id, faction_name, source_updated_at, observed_at, source
+        )
+        SELECT
+          stations.id, patch.faction_id, patch.faction_name,
+          patch.source_updated_at, now(), 'edsm-stations-snapshot'
+        FROM patch_rows patch
+        JOIN systems ON systems.name = patch.system_name
+        JOIN stations ON stations.system_id = systems.id AND stations.name = patch.station_name
+        WHERE patch.faction_name IS NOT NULL
+          AND patch.source_updated_at IS NOT NULL
+        ON CONFLICT (station_id, faction_name, source_updated_at) DO NOTHING
+      `,
+      [
+        stations.map((station) => station.systemName),
+        stations.map((station) => station.name),
+        stations.map((station) => station.controllingFactionId),
+        stations.map((station) => station.controllingFactionName),
+        stations.map((station) => station.controllingFactionUpdatedAt),
+      ],
+    );
+    imported = result.rowCount ?? 0;
+  });
+
+  return imported;
 }
 
 async function patchPowerplayBatch(
   database: DatabaseManager,
   systems: readonly ImportedPowerplaySystem[],
+  observedAt: string,
 ): Promise<number> {
-  const result = await database.query(
+  let imported = 0;
+  await database.transaction(async (client) => {
+    await client.query(
+      `
+        WITH patch_rows AS (
+          SELECT *
+          FROM unnest(
+            $1::bigint[],
+            $2::text[],
+            $3::text[],
+            $4::text[],
+            $5::text[],
+            $6::text[],
+            $7::timestamp with time zone[],
+            $8::timestamp with time zone[]
+          ) AS patch(system_id, power, power_state, allegiance, government, system_state, source_updated_at, observed_at)
+        )
+        INSERT INTO powerplay_state_history (
+          system_id, power, power_state, allegiance, government,
+          system_state, source_updated_at, observed_at, source
+        )
+        SELECT
+          patch.system_id, patch.power, patch.power_state, patch.allegiance,
+          patch.government, patch.system_state, patch.source_updated_at, patch.observed_at,
+          'edsm-powerplay-import'
+        FROM patch_rows patch
+        LEFT JOIN powerplay_systems current
+          ON current.system_id = patch.system_id AND current.power = patch.power
+        WHERE current.system_id IS NULL
+           OR (
+             current.updated_at <= patch.source_updated_at
+             AND (current.power_state, current.allegiance, current.government, current.state)
+                 IS DISTINCT FROM
+                 (patch.power_state, patch.allegiance, patch.government, patch.system_state)
+           )
+      `,
+      [
+        systems.map((system) => system.systemId),
+        systems.map((system) => system.power),
+        systems.map((system) => system.powerState),
+        systems.map((system) => system.allegiance),
+        systems.map((system) => system.government),
+        systems.map((system) => system.state),
+        systems.map((system) => system.updatedAt),
+        systems.map(() => observedAt),
+      ],
+    );
+    const result = await client.query(
     `
       INSERT INTO powerplay_systems (
         system_id,
@@ -933,7 +1064,8 @@ async function patchPowerplayBatch(
         allegiance,
         government,
         state,
-        updated_at
+        updated_at,
+        last_seen_at
       )
       SELECT *
       FROM unnest(
@@ -943,16 +1075,17 @@ async function patchPowerplayBatch(
         $4::text[],
         $5::text[],
         $6::text[],
-        $7::timestamp with time zone[]
+        $7::timestamp with time zone[],
+        $8::timestamp with time zone[]
       )
       ON CONFLICT (system_id, power) DO UPDATE
       SET
-        power_state = EXCLUDED.power_state,
-        allegiance = EXCLUDED.allegiance,
-        government = EXCLUDED.government,
-        state = EXCLUDED.state,
-        updated_at = EXCLUDED.updated_at
-      WHERE powerplay_systems.updated_at <= EXCLUDED.updated_at
+        power_state = CASE WHEN powerplay_systems.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.power_state ELSE powerplay_systems.power_state END,
+        allegiance = CASE WHEN powerplay_systems.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.allegiance ELSE powerplay_systems.allegiance END,
+        government = CASE WHEN powerplay_systems.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.government ELSE powerplay_systems.government END,
+        state = CASE WHEN powerplay_systems.updated_at <= EXCLUDED.updated_at THEN EXCLUDED.state ELSE powerplay_systems.state END,
+        updated_at = GREATEST(powerplay_systems.updated_at, EXCLUDED.updated_at),
+        last_seen_at = GREATEST(powerplay_systems.last_seen_at, EXCLUDED.last_seen_at)
     `,
     [
       systems.map((system) => system.systemId),
@@ -962,10 +1095,13 @@ async function patchPowerplayBatch(
       systems.map((system) => system.government),
       systems.map((system) => system.state),
       systems.map((system) => system.updatedAt),
+      systems.map(() => observedAt),
     ],
-  );
+    );
+    imported = result.rowCount ?? 0;
+  });
 
-  return result.rowCount ?? 0;
+  return imported;
 }
 
 function recordsPerSecond(records: number, startedAt: number): number {

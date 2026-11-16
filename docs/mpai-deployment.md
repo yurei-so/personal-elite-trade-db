@@ -33,3 +33,30 @@ schema-only restore was checked before the initial transfer; the PostgreSQL 18
 plain dump's `\restrict`, `\unrestrict`, and `SET transaction_timeout` lines
 were omitted for PostgreSQL 17 compatibility. The initial data migration and
 post-start checks are recorded in [mpai-live-2026-11-09.md](mpai-live-2026-11-09.md).
+
+## Predictive-data rollout
+
+For schema changes in the PP2.0/BGS work, keep PostgreSQL running and stop only
+`elite-db-app.service` before the one-time price correction. The app release
+must include the new schema before importing the EDSM snapshots. Preserve the
+current release and take a fresh PostgreSQL custom-format backup under
+`~/.local/share/personal-elite-trade-db/backups/`; check it with `pg_restore
+-l` before proceeding. Do not print runtime `.env` contents or database
+credentials into a receipt.
+
+After the updated release is built and selected as `current`, run
+`node dist/index.js --migrate-price-semantics` once while the EDDN writer is
+stopped. This initializes the additive history schema and transactionally
+swaps the two existing EDDN projection price columns, guarded by a migration
+marker. The command is safe to repeat after success. Then run the additive
+station and PowerPlay archive imports using the provided, checksum-verified
+archives, and restart only `elite-db-app.service` so EDDN writes resume.
+
+Before restarting the `roost-eddb` adapter, grant its existing
+`eddb_readonly` role SELECT on only the seven new relations listed in the
+adapter's `docs/extend-readonly-grants.sql`. Keep its existing restrictions,
+role identity, and connection configuration. The adapter's SQL allowlist and
+the database grants must match. Verify the app unit, EDDN connection, schema
+doctor, market-price direction, PP2.0/history counts, BGS observations, and the
+adapter's schema/freshness response after rollout. Do not use the privileged
+workstation database account for the adapter.
