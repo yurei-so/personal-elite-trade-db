@@ -27,10 +27,10 @@
   recorded 702,088 controlling-faction observations across 702,085 distinct
   stations; 36,165 rows had no matching system, 73 were duplicate station
   identities, and one was malformed. No identity was guessed.
-- At the captured live check, `bgs_system_observations` contained 140 EDDN
-  journal observations and `bgs_faction_observations` contained 744 faction
-  records. `market_snapshots` contained 154 events and `market_observations`
-  contained 24,309 commodity observations. These are early collection counts,
+- At `2026-11-16 14:49:26 CST`, `bgs_system_observations` contained 285 EDDN
+  journal observations and `bgs_faction_observations` contained 1,510 faction
+  records. `market_snapshots` contained 273 events and `market_observations`
+  contained 42,004 commodity observations. These are early collection counts,
   not a claim of broad coverage or a predictive result.
 
 ## Runtime and access
