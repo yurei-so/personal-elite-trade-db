@@ -120,7 +120,9 @@ npm run dev -- --import-powerplay
 
 You can pass an explicit archive path after any import flag.
 Station and PowerPlay imports merge records without deleting rows; older dump
-records do not overwrite newer local records. PowerPlay rows are stored per
+records do not overwrite newer local records. Future-dated source timestamps
+are ignored, and station timestamps use the latest valid information, market,
+shipyard, or outfitting update time. PowerPlay rows are stored per
 `(system_id, power)` in `powerplay_systems`, with the EDSM record date retained
 as `updated_at`. PowerPlay records can add missing systems using their supplied
 name and coordinates. The station archive's embedded market quotes are not

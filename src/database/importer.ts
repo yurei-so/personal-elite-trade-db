@@ -680,12 +680,16 @@ function readStationUpdatedAt(value: unknown): string | undefined {
   }
 
   const updateTime = value as RawStationUpdateTime;
+  const dates = [
+    updateTime.information,
+    updateTime.market,
+    updateTime.shipyard,
+    updateTime.outfitting,
+  ].map(readDate).filter((date): date is string => date !== undefined);
 
-  return (
-    readDate(updateTime.information) ??
-    readDate(updateTime.market) ??
-    readDate(updateTime.shipyard) ??
-    readDate(updateTime.outfitting)
+  return dates.reduce<string | undefined>(
+    (latest, date) => !latest || Date.parse(date) > Date.parse(latest) ? date : latest,
+    undefined,
   );
 }
 
@@ -1091,5 +1095,7 @@ function readDate(value: unknown): string | undefined {
     : `${timestamp}Z`;
   const date = new Date(withTimezone);
 
-  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+  return Number.isNaN(date.getTime()) || date.getTime() > Date.now()
+    ? undefined
+    : date.toISOString();
 }
