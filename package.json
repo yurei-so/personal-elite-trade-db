@@ -9,7 +9,6 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "npm run typecheck",
-    "postinstall": "npm run build && npm start -- --init --doctor",
     "serve": "npm start -- --eddn --dashboard-port 3000",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
