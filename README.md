@@ -127,6 +127,8 @@ shipyard, or outfitting update time. PowerPlay rows are stored per
 as `updated_at`. PowerPlay records can add missing systems using their supplied
 name and coordinates. The station archive's embedded market quotes are not
 imported; the live EDDN feed remains the market source.
+See the [2026-11-16 EDSM import receipt](docs/edsm-import-2026-11-16.md) for
+live counts, source hashes, and validation details.
 
 Destroy the configured PostgreSQL database after verifying the admin password
 hash stored in `.env`:
