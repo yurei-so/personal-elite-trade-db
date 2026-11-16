@@ -5,9 +5,11 @@
 - App `dev` commits: `1819271` (PP2.0/BGS observation history) and `783be08`
   (remove database initialization from npm postinstall).
 - EDDB adapter `dev` commit: `fb13a04` (read-only PP2.0/BGS/market history).
-- Active app release: `releases/1819271`; the prior `58473c3` release remains
-  preserved for reference. Only `elite-db-app.service` was stopped and started;
-  PostgreSQL remained running.
+- Active app release: `releases/783be08`; the equivalent staged
+  `releases/1819271` and prior `58473c3` release remain preserved for reference.
+  The active path was aligned atomically after startup; compiled app hashes
+  match. Only `elite-db-app.service` was stopped and started; PostgreSQL
+  remained running.
 - A fresh custom-format backup was taken before schema or data changes at
   `~/.local/share/personal-elite-trade-db/backups/personal_elite_trade_db-pre-pp2-bgs-20261116.dump`.
   `pg_restore -l` succeeded. SHA-256:
