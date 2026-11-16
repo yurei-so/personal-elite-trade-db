@@ -8,6 +8,7 @@ import type { DatabaseManager } from "./manager";
 const DEFAULT_IMPORT_WORKSPACE = "import";
 const DEFAULT_SYSTEMS_IMPORT_FILE = "systemsPopulated.json.gz";
 const DEFAULT_STATIONS_IMPORT_FILE = "stations.json.gz";
+const DEFAULT_POWERPLAY_IMPORT_FILE = "powerPlay.json.gz";
 const DEFAULT_BATCH_SIZE = 50;
 const DEFAULT_STATIONS_BATCH_SIZE = 1_000;
 const DEFAULT_PROGRESS_RECORDS = 10_000;
@@ -42,6 +43,23 @@ export interface StationsImportResult {
   readonly stationsImported: number;
   readonly stationsSkipped: number;
   readonly stationsWithoutImportedSystems: number;
+  readonly workspacePath: string;
+}
+
+export interface PowerplayImportOptions {
+  readonly batchSize?: number;
+  readonly filePath?: string;
+  readonly logger?: Pick<Console, "log" | "warn">;
+  readonly workspacePath?: string;
+}
+
+export interface PowerplayImportResult {
+  readonly batchesPatched: number;
+  readonly filePath: string;
+  readonly powerplayImported: number;
+  readonly powerplaySkipped: number;
+  readonly powerplayWithoutImportedSystems: number;
+  readonly powerplaySystemsAdded: number;
   readonly workspacePath: string;
 }
 
@@ -101,14 +119,46 @@ interface RawStationUpdateTime {
   readonly shipyard?: unknown;
 }
 
+interface ImportedPowerplaySystem {
+  readonly allegiance: string | null;
+  readonly government: string | null;
+  readonly power: string;
+  readonly powerState: string;
+  readonly state: string | null;
+  readonly systemId: number;
+  readonly systemName: string;
+  readonly updatedAt: string;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
+}
+
+interface RawImportedPowerplaySystem {
+  readonly allegiance?: unknown;
+  readonly date?: unknown;
+  readonly government?: unknown;
+  readonly id?: unknown;
+  readonly power?: unknown;
+  readonly powerState?: unknown;
+  readonly name?: unknown;
+  readonly coords?: unknown;
+  readonly state?: unknown;
+}
+
+interface RawCoordinates {
+  readonly x?: unknown;
+  readonly y?: unknown;
+  readonly z?: unknown;
+}
+
 interface SystemIdRow {
   readonly id: string;
   readonly name: string;
 }
 
 interface ImportedSystemLookup {
-  readonly ids: ReadonlySet<number>;
-  readonly names: ReadonlyMap<string, number>;
+  readonly ids: Set<number>;
+  readonly names: Map<string, number>;
 }
 
 interface ImportPatchResult {
@@ -287,6 +337,121 @@ export async function importStations(
   };
 }
 
+export async function importPowerplay(
+  database: DatabaseManager,
+  options: PowerplayImportOptions = {},
+): Promise<PowerplayImportResult> {
+  const logger = options.logger ?? console;
+  const workspacePath = path.resolve(options.workspacePath ?? DEFAULT_IMPORT_WORKSPACE);
+  const filePath = path.resolve(
+    options.filePath ?? path.join(workspacePath, DEFAULT_POWERPLAY_IMPORT_FILE),
+  );
+  const batchSize = options.batchSize ?? DEFAULT_STATIONS_BATCH_SIZE;
+  const batch: ImportedPowerplaySystem[] = [];
+  const systemsToAdd = new Map<number, ImportedSystem>();
+  const pendingSystemIdsByName = new Map<string, number>();
+  const startedAt = Date.now();
+  let batchesPatched = 0;
+  let powerplayImported = 0;
+  let powerplaySkipped = 0;
+  let powerplayWithoutImportedSystems = 0;
+  let powerplaySystemsAdded = 0;
+
+  if (!Number.isInteger(batchSize) || batchSize < 1) {
+    throw new Error("Import batch size must be a positive integer.");
+  }
+
+  await mkdir(workspacePath, { recursive: true });
+  logger.log(`Import workspace ready at ${workspacePath}`);
+  logger.log(`Importing PowerPlay systems from ${filePath}`);
+
+  const importedSystems = await loadImportedSystemLookup(database);
+  logger.log(
+    `Loaded ${importedSystems.ids.size.toLocaleString()} imported systems for PowerPlay matching.`,
+  );
+
+  let recordsParsed = 0;
+  for await (const candidate of streamTopLevelJsonObjects(filePath)) {
+    const system = parseImportedPowerplaySystem(candidate);
+
+    if (!system) {
+      powerplaySkipped += 1;
+      continue;
+    }
+
+    recordsParsed += 1;
+    if (!importedSystems.ids.has(system.systemId)) {
+      const existingNameId = importedSystems.names.get(system.systemName);
+      const pendingNameId = pendingSystemIdsByName.get(system.systemName);
+      if ((existingNameId !== undefined && existingNameId !== system.systemId)
+        || (pendingNameId !== undefined && pendingNameId !== system.systemId)) {
+        powerplayWithoutImportedSystems += 1;
+        continue;
+      }
+      const pending = systemsToAdd.get(system.systemId);
+      if (!pending || Date.parse(system.updatedAt) > Date.parse(pending.updatedAt)) {
+        systemsToAdd.set(system.systemId, {
+          id: system.systemId,
+          name: system.systemName,
+          x: system.x,
+          y: system.y,
+          z: system.z,
+          updatedAt: system.updatedAt,
+        });
+        pendingSystemIdsByName.set(system.systemName, system.systemId);
+      }
+    }
+
+    batch.push(system);
+    if (batch.length >= batchSize) {
+      const newSystems = [...systemsToAdd.values()];
+      if (newSystems.length > 0) {
+        await patchSystems(database, newSystems, logger);
+        for (const row of newSystems) {
+          importedSystems.ids.add(row.id);
+          importedSystems.names.set(row.name, row.id);
+        }
+        powerplaySystemsAdded += newSystems.length;
+        systemsToAdd.clear();
+        pendingSystemIdsByName.clear();
+      }
+      powerplayImported += await patchPowerplayBatch(database, batch);
+      batchesPatched += 1;
+      batch.length = 0;
+    }
+
+    if (shouldLogImportProgress(recordsParsed)) {
+      logger.log(
+        `PowerPlay import progress: parsed ${recordsParsed.toLocaleString()}, imported ${powerplayImported.toLocaleString()}, missing systems ${powerplayWithoutImportedSystems.toLocaleString()}, malformed ${powerplaySkipped.toLocaleString()}, batches ${batchesPatched.toLocaleString()}, ${recordsPerSecond(recordsParsed, startedAt).toLocaleString()} records/s`,
+      );
+    }
+  }
+
+  if (batch.length > 0) {
+    const newSystems = [...systemsToAdd.values()];
+    if (newSystems.length > 0) {
+      await patchSystems(database, newSystems, logger);
+      for (const row of newSystems) {
+        importedSystems.ids.add(row.id);
+        importedSystems.names.set(row.name, row.id);
+      }
+      powerplaySystemsAdded += newSystems.length;
+    }
+    powerplayImported += await patchPowerplayBatch(database, batch);
+    batchesPatched += 1;
+  }
+
+  return {
+    batchesPatched,
+    filePath,
+    powerplayImported,
+    powerplaySkipped,
+    powerplayWithoutImportedSystems,
+    powerplaySystemsAdded,
+    workspacePath,
+  };
+}
+
 async function* streamTopLevelJsonObjects(
   filePath: string,
 ): AsyncGenerator<string> {
@@ -449,6 +614,52 @@ function parseImportedStation(candidate: string): ImportedStation | undefined {
   };
 }
 
+function parseImportedPowerplaySystem(
+  candidate: string,
+): ImportedPowerplaySystem | undefined {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(candidate);
+  } catch {
+    return undefined;
+  }
+
+  if (!isPlainObject(parsed)) {
+    return undefined;
+  }
+
+  const raw = parsed as RawImportedPowerplaySystem;
+  const systemId = readNumber(raw.id);
+  const power = readString(raw.power);
+  const powerState = readString(raw.powerState);
+  const systemName = readString(raw.name);
+  const coords = isPlainObject(raw.coords) ? raw.coords as RawCoordinates : undefined;
+  const x = readNumber(coords?.x);
+  const y = readNumber(coords?.y);
+  const z = readNumber(coords?.z);
+  const updatedAt = readDate(raw.date);
+
+  if (systemId === undefined || !power || !powerState || !systemName
+    || x === undefined || y === undefined || z === undefined || !updatedAt) {
+    return undefined;
+  }
+
+  return {
+    allegiance: readStringOrNull(raw.allegiance),
+    government: readStringOrNull(raw.government),
+    power,
+    powerState,
+    state: readStringOrNull(raw.state),
+    systemId,
+    systemName,
+    updatedAt,
+    x,
+    y,
+    z,
+  };
+}
+
 function readStationHeader(candidate: string): RawImportedStation | undefined {
   const commoditiesIndex = candidate.indexOf("\"commodities\"");
   const header =
@@ -538,6 +749,7 @@ async function patchSystemsBatch(
         y = EXCLUDED.y,
         z = EXCLUDED.z,
         updated_at = EXCLUDED.updated_at
+      WHERE systems.updated_at <= EXCLUDED.updated_at
     `,
     [
       systems.map((system) => system.id),
@@ -686,6 +898,7 @@ async function patchStationsBatch(
         has_market = EXCLUDED.has_market,
         is_planetary = EXCLUDED.is_planetary,
         updated_at = EXCLUDED.updated_at
+      WHERE stations.updated_at <= EXCLUDED.updated_at
     `,
     [
       stations.map((station) => station.id),
@@ -701,6 +914,59 @@ async function patchStationsBatch(
   );
 
   return result.rowCount ?? 0;
+}
+
+async function patchPowerplayBatch(
+  database: DatabaseManager,
+  systems: readonly ImportedPowerplaySystem[],
+): Promise<number> {
+  const result = await database.query(
+    `
+      INSERT INTO powerplay_systems (
+        system_id,
+        power,
+        power_state,
+        allegiance,
+        government,
+        state,
+        updated_at
+      )
+      SELECT *
+      FROM unnest(
+        $1::bigint[],
+        $2::text[],
+        $3::text[],
+        $4::text[],
+        $5::text[],
+        $6::text[],
+        $7::timestamp with time zone[]
+      )
+      ON CONFLICT (system_id, power) DO UPDATE
+      SET
+        power_state = EXCLUDED.power_state,
+        allegiance = EXCLUDED.allegiance,
+        government = EXCLUDED.government,
+        state = EXCLUDED.state,
+        updated_at = EXCLUDED.updated_at
+      WHERE powerplay_systems.updated_at <= EXCLUDED.updated_at
+    `,
+    [
+      systems.map((system) => system.systemId),
+      systems.map((system) => system.power),
+      systems.map((system) => system.powerState),
+      systems.map((system) => system.allegiance),
+      systems.map((system) => system.government),
+      systems.map((system) => system.state),
+      systems.map((system) => system.updatedAt),
+    ],
+  );
+
+  return result.rowCount ?? 0;
+}
+
+function recordsPerSecond(records: number, startedAt: number): number {
+  const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1_000));
+  return Math.round(records / elapsedSeconds);
 }
 
 function logStationImportProgress(

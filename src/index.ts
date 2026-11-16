@@ -11,6 +11,7 @@ import type { DatabaseDoctorReport, DatabaseDoctorStatus } from "./database";
 import {
   applyDatabasePatches,
   createDatabaseManager,
+  importPowerplay,
   importStations,
   importSystems,
 } from "./database";
@@ -113,7 +114,7 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       return;
     }
 
-    if (parsedArgs.importSystems || parsedArgs.importStations) {
+    if (parsedArgs.importSystems || parsedArgs.importStations || parsedArgs.importPowerplay) {
       if (!parsedArgs.initializeDatabase) {
         const result = await database.initialize();
 
@@ -191,7 +192,41 @@ export async function main(args: readonly string[] = process.argv.slice(2)): Pro
       }
     }
 
-    if (parsedArgs.importSystems || parsedArgs.importStations) {
+    if (parsedArgs.importPowerplay) {
+      const result = await importPowerplay(database, {
+        filePath: parsedArgs.importPowerplayFilePath,
+      });
+
+      console.log(
+        `${statusTag("ok")} Imported ${valueText(
+          String(result.powerplayImported),
+        )} PowerPlay system-power rows across ${valueText(String(result.batchesPatched))} batches.`,
+      );
+
+      if (result.powerplaySystemsAdded > 0) {
+        console.log(
+          `${statusTag("ok")} Added ${valueText(String(result.powerplaySystemsAdded))} missing systems from PowerPlay coordinates.`,
+        );
+      }
+
+      if (result.powerplaySkipped > 0) {
+        console.log(
+          `${statusTag("warn")} Skipped ${valueText(
+            String(result.powerplaySkipped),
+          )} malformed PowerPlay records.`,
+        );
+      }
+
+      if (result.powerplayWithoutImportedSystems > 0) {
+        console.log(
+          `${statusTag("warn")} Skipped ${valueText(
+            String(result.powerplayWithoutImportedSystems),
+          )} PowerPlay records whose systems are not imported yet.`,
+        );
+      }
+    }
+
+    if (parsedArgs.importSystems || parsedArgs.importStations || parsedArgs.importPowerplay) {
       return;
     }
 
@@ -219,6 +254,8 @@ interface ParsedArgs {
   readonly enableWrite: boolean;
   readonly envValues: ManagedEnvUpdates;
   readonly hasPasswordUpdates: boolean;
+  readonly importPowerplay: boolean;
+  readonly importPowerplayFilePath: string | undefined;
   readonly importStations: boolean;
   readonly importStationsFilePath: string | undefined;
   readonly importSystems: boolean;
@@ -238,6 +275,8 @@ function parseArgs(args: readonly string[]): ParsedArgs {
   let destroyPassword: string | undefined;
   let dashboardPort: number | undefined;
   let enableWrite = false;
+  let importPowerplayFilePath: string | undefined;
+  let importPowerplayFlag = false;
   let importStationsFilePath: string | undefined;
   let importStationsFlag = false;
   let importSystemsFilePath: string | undefined;
@@ -262,6 +301,8 @@ function parseArgs(args: readonly string[]): ParsedArgs {
         enableWrite: false,
         envValues,
         hasPasswordUpdates: false,
+        importPowerplay: false,
+        importPowerplayFilePath: undefined,
         importStations: false,
         importStationsFilePath: undefined,
         importSystems: false,
@@ -350,6 +391,19 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       continue;
     }
 
+    if (arg === "--import-powerplay") {
+      importPowerplayFlag = true;
+
+      const nextArg = args[index + 1];
+
+      if (nextArg && !nextArg.startsWith("--")) {
+        importPowerplayFilePath = nextArg;
+        index += 1;
+      }
+
+      continue;
+    }
+
     if (arg === "--destroy-db") {
       destroyDatabase = true;
       continue;
@@ -418,6 +472,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
     (destroyDatabase ||
       importStationsFlag ||
       importSystemsFlag ||
+      importPowerplayFlag ||
       initializeDatabase ||
       runDoctor)
   ) {
@@ -439,6 +494,8 @@ function parseArgs(args: readonly string[]): ParsedArgs {
     enableWrite,
     envValues,
     hasPasswordUpdates: updatedLabels.length > 0,
+    importPowerplay: importPowerplayFlag,
+    importPowerplayFilePath,
     importStations: importStationsFlag,
     importStationsFilePath,
     importSystems: importSystemsFlag,
@@ -1044,6 +1101,7 @@ Usage:
   npm run dev -- --init
   npm run dev -- --import-systems [systems file]
   npm run dev -- --import-stations [stations file]
+  npm run dev -- --import-powerplay [PowerPlay file]
   npm run dev -- --destroy-db --password <admin password>
   npm run dev -- --eddn
   npm run dev -- --eddn --enable-write
@@ -1060,6 +1118,7 @@ Database flags:
   --password <password>                 Admin password required by --destroy-db.
   --import-systems [systems file]       Import gzipped systems JSON from import/.
   --import-stations [stations file]     Import gzipped stations JSON from import/.
+  --import-powerplay [PowerPlay file]   Import gzipped EDSM PowerPlay JSON from import/.
 
 EDDN flags:
   --eddn                                Listen for commodity market messages and log them.

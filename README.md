@@ -110,14 +110,21 @@ Check the database connection, account privileges, schema, and debug info:
 npm run dev -- --doctor
 ```
 
-Import the default gzipped systems and stations snapshots from `import/`:
+Import the default gzipped systems, stations, or PowerPlay snapshot from `import/`:
 
 ```bash
 npm run dev -- --import-systems
 npm run dev -- --import-stations
+npm run dev -- --import-powerplay
 ```
 
-You can pass an explicit archive path after either flag.
+You can pass an explicit archive path after any import flag.
+Station and PowerPlay imports merge records without deleting rows; older dump
+records do not overwrite newer local records. PowerPlay rows are stored per
+`(system_id, power)` in `powerplay_systems`, with the EDSM record date retained
+as `updated_at`. PowerPlay records can add missing systems using their supplied
+name and coordinates. The station archive's embedded market quotes are not
+imported; the live EDDN feed remains the market source.
 
 Destroy the configured PostgreSQL database after verifying the admin password
 hash stored in `.env`:

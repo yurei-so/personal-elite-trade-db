@@ -138,6 +138,22 @@ const EXPECTED_TABLES: readonly ExpectedTable[] = [
     ],
   },
   {
+    name: "powerplay_systems",
+    columns: [
+      { name: "system_id", type: "bigint", isNullable: false },
+      { name: "power", type: "text", isNullable: false },
+      { name: "power_state", type: "text", isNullable: false },
+      { name: "allegiance", type: "text", isNullable: true },
+      { name: "government", type: "text", isNullable: true },
+      { name: "state", type: "text", isNullable: true },
+      { name: "updated_at", type: "timestamp with time zone", isNullable: false },
+    ],
+    constraints: [{ type: "PRIMARY KEY", columns: ["system_id", "power"] }],
+    foreignKeys: [
+      { column: "system_id", referencedTable: "systems", referencedColumn: "id" },
+    ],
+  },
+  {
     name: "commodities",
     columns: [
       { name: "id", type: "text", isNullable: false },
@@ -646,6 +662,19 @@ async function initializeDatabaseSetup(client: PoolClient): Promise<void> {
       is_planetary boolean,
       updated_at timestamp with time zone NOT NULL,
       UNIQUE (system_id, name)
+    )
+  `);
+
+  await client.query(`
+    CREATE TABLE IF NOT EXISTS powerplay_systems (
+      system_id bigint NOT NULL REFERENCES systems(id),
+      power text NOT NULL,
+      power_state text NOT NULL,
+      allegiance text,
+      government text,
+      state text,
+      updated_at timestamp with time zone NOT NULL,
+      PRIMARY KEY (system_id, power)
     )
   `);
 

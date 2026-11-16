@@ -1,5 +1,5 @@
 export { DatabaseSetupError, createDatabaseManager } from "./manager";
-export { importStations, importSystems } from "./importer";
+export { importPowerplay, importStations, importSystems } from "./importer";
 export type {
   DatabaseDoctorReport,
   DatabaseDoctorStatus,
@@ -8,6 +8,8 @@ export type {
   DatabaseQueryParams,
 } from "./manager";
 export type {
+  PowerplayImportOptions,
+  PowerplayImportResult,
   StationsImportOptions,
   StationsImportResult,
   SystemsImportOptions,
